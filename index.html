@@ -124,28 +124,17 @@
         vid.crossOrigin = 'anonymous';
         vid.src = url;
         vid.loop = true;
-        vid.muted = true; // Autoplay-Policy
+        vid.muted = true;
         vid.playsInline = true;
         vid.play().catch(log);
         currentVideo = vid;
         if (xrSession) await rebuildMediaLayer(vid);
       } else if (type === 'image') {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.src = url;
-        await img.decode();
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        const vid = canvas.captureStream(0).getVideoTracks()[0];
-        const vs = new MediaStream([vid]);
-        const el = document.createElement('video');
-        el.srcObject = vs;
-        el.play();
-        currentVideo = el;
-        if (xrSession) await rebuildMediaLayer(el);
+        // NEU: Bild → Video-Element
+        const video = await import('./image-to-video.js').then(m => m.imageToVideo(file));
+        currentVideo = video;
+        currentName = file.name;
+        if (xrSession) await rebuildMediaLayer(video);
       } else if (type === 'model') {
         currentVideo = null;
         if (xrSession) {
@@ -251,14 +240,22 @@
     };
     $('#showFavBtn').onclick = () => fav.showUI();
 
-    /* ========== FILE / URL INPUT ========== */
-    $('#fileIn').onchange = e => {
+    /* ========== FILE / URL INPUT – GEÄNDERT FÜR BILDER ========== */
+    $('#fileIn').onchange = async e => {
       const file = e.target.files[0];
       if (!file) return;
-      const url = URL.createObjectURL(file);
       const type = file.name.match(/\.(glb|gltf)$/i) ? 'model' :
                    file.type.startsWith('video') ? 'video' : 'image';
-      loadMedia(url, type, 'mono');
+      if (type === 'image') {
+        const video = await import('./image-to-video.js').then(m => m.imageToVideo(file));
+        currentVideo = video;
+        currentType = 'image';
+        currentName = file.name;
+        if (xrSession) await rebuildMediaLayer(video);
+      } else {
+        const url = URL.createObjectURL(file);
+        loadMedia(url, type, 'mono');
+      }
     };
     $('#urlBtn').onclick = () => {
       const url = $('#urlIn').value.trim();
@@ -278,7 +275,6 @@
         const glLayer = session.renderState.baseLayer;
         gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
         if (currentType === 'model' && !mediaLayer) {
-          // klassisches three.js für Modelle
           for (const view of pose.views) {
             const viewport = glLayer.getViewport(view);
             renderer.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
