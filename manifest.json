@@ -1,0 +1,15 @@
+{
+  "name": "Mini-Moon WebXR Player",
+  "short_name": "MiniMoon",
+  "display": "fullscreen",
+  "start_url": "/",
+  "background_color": "#000",
+  "theme_color": "#000",
+  "icons": [
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
