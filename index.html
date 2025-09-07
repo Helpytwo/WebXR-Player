@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>Mini-Moon WebXR Player</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{margin:0;font-family:system-ui;background:#000;color:#fff;overflow:hidden}
+    #flatUI{position:absolute;top:0;left:0;right:0;background:#111a;padding:.5em;z-index:10}
+    #flatUI label{display:inline-block;margin:.3em 1em .3em 0;font-size:.9em}
+    #flatUI input[type=range]{width:120px}
+    #flatUI button{margin:0 .2em;padding:.3em .6em;background:#0bf;border:0;color:#000;border-radius:4px;cursor:pointer}
+    #flatUI button:hover{background:#0df}
+    #flatUI button.danger{background:#c00;color:#fff}
+    #favPanel{max-height:40vh;overflow:auto;background:#222;margin-top:.5em;padding:.5em;display:none}
+    .favRow{display:flex;align-items:center;margin:.2em 0}
+    .favRow img{width:60px;height:34px;object-fit:cover;margin-right:.5em;border-radius:4px}
+    .favRow span{flex:1}
+    #fileIn,#urlIn,#modelIn{margin:.2em 0}
+    #logger{position:absolute;bottom:0;left:0;right:0;background:#000a;color:#0f0;font-family:monospace;font-size:12px;max-height:6em;overflow:auto;padding:.3em;pointer-events:none}
+  </style>
+</head>
+<body>
+  <div id="flatUI">
+    <div>
+      <input type="file" id="fileIn" accept="video/*,image/*,.glb,.gltf">
+      <input type="url" id="urlIn" placeholder="http...">
+      <button id="urlBtn">URL laden</button>
+    </div>
+    <div>
+      <label>Größe <input type="range" id="sizeSL" min="1" max="10" step="0.1" value="4"></label>
+      <label>Distanz <input type="range" id="distSL" min="1" max="8" step="0.1" value="2.5"></label>
+      <label><input type="checkbox" id="curveCB"> Gebogen</label>
+      <label>Stereo
+        <select id="stereoSel">
+          <option value="mono">2D</option>
+          <option value="sbs">SBS</option>
+          <option value="tb">TB</option>
+        </select>
+      </label>
+      <button id="resetBtn">Reset</button>
+      <button id="favBtn">⭐ Favorit</button>
+      <button id="showFavBtn">Favoriten</button>
+    </div>
+    <div id="favPanel"></div>
+  </div>
+
+  <canvas id="webgl" style="width:100%;height:100%;display:block"></canvas>
+  <pre id="logger"></pre>
+
+  <!-- three.js nur für glTF -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/GLTFLoader.js"></script>
+
+  <script type="module">
+    /* ========== UTILS ========== */
+    const log = (...a) => {
+      const l = document.getElementById('logger');
+      l.textContent = [...a].join(' ') + '\n' + l.textContent.slice(0,800);
+    };
+    const $ = q => document.querySelector(q);
+
+    /* ========== STATE ========== */
+    let xrSession = null, gl = null, mediaLayer = null, currentVideo = null;
+    let currentType = '', currentStereo = 'mono', currentName = '';
+    let scene, camera, renderer, gltfScene = null;
+
+    const DEFAULTS = { width:4, height:2.25, radius:4, centralAngle:70*Math.PI/180, distance:2.5 };
+
+    /* ========== FAVORITEN ========== */
+    const FAV_KEY = 'mm_favs';
+    const fav = {
+      getAll: () => JSON.parse(localStorage.getItem(FAV_KEY) || '[]'),
+      add(item) {
+        const list = this.getAll();
+        if (list.find(i => i.url === item.url)) return log('Bereits in Favoriten');
+        item.id = crypto.randomUUID();
+        list.push(item);
+        localStorage.setItem(FAV_KEY, JSON.stringify(list));
+        log('Favorit gespeichert');
+      },
+      remove(id) {
+        let list = this.getAll();
+        list = list.filter(i => i.id !== id);
+        localStorage.setItem(FAV_KEY, JSON.stringify(list));
+        this.showUI();
+      },
+      showUI() {
+        const pan = $('#favPanel');
+        pan.style.display = pan.style.display === 'block' ? 'none' : 'block';
+        const items = this.getAll();
+        pan.innerHTML = items.map(i => `
+          <div class="favRow">
+            <img src="${i.thumb}" onerror="this.style.display='none'">
+            <span>${i.name}</span>
+            <button onclick="playFav('${i.id}')">▶</button>
+            <button class="danger" onclick="fav.remove('${i.id}')">🗑</button>
+          </div>`).join('');
+      }
+    };
+    window.fav = fav;
+    window.playFav = id => {
+      const f = fav.getAll().find(i => i.id === id);
+      if (!f) return;
+      loadMedia(f.url, f.type, f.stereo, f.screen);
+    };
+
+    /* ========== MEDIA LOADING ========== */
+    async function loadMedia(url, type, stereo, screenCfg) {
+      $('#stereoSel').value = stereo;
+      if (screenCfg) {
+        $('#sizeSL').value = screenCfg.curve ? screenCfg.radius : screenCfg.width;
+        $('#distSL').value = screenCfg.distance;
+        $('#curveCB').checked = screenCfg.curve;
+      }
+      currentType = type;
+      currentStereo = stereo;
+      currentName = url.split('/').pop().split('#')[0].split('?')[0];
+
+      if (type === 'video') {
+        const vid = document.createElement('video');
+        vid.crossOrigin = 'anonymous';
+        vid.src = url;
+        vid.loop = true;
+        vid.muted = true; // Autoplay-Policy
+        vid.playsInline = true;
+        vid.play().catch(log);
+        currentVideo = vid;
+        if (xrSession) await rebuildMediaLayer(vid);
+      } else if (type === 'image') {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = url;
+        await img.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const vid = canvas.captureStream(0).getVideoTracks()[0];
+        const vs = new MediaStream([vid]);
+        const el = document.createElement('video');
+        el.srcObject = vs;
+        el.play();
+        currentVideo = el;
+        if (xrSession) await rebuildMediaLayer(el);
+      } else if (type === 'model') {
+        currentVideo = null;
+        if (xrSession) {
+          removeMediaLayer();
+          await loadGLTF(url);
+        }
+      }
+      log(`${type} geladen: ${currentName}`);
+    }
+
+    /* ========== GLTF (3D-Model) ========== */
+    async function loadGLTF(url) {
+      if (gltfScene) { scene.remove(gltfScene); gltfScene = null; }
+      const loader = new THREE.GLTFLoader();
+      const gltf = await loader.loadAsync(url);
+      gltfScene = gltf.scene;
+      scene.add(gltfScene);
+    }
+
+    /* ========== WEBXR SETUP ========== */
+    async function initXR() {
+      if (!navigator.xr) return log('WebXR nicht verfügbar');
+      const ok = await navigator.xr.isSessionSupported('immersive-vr');
+      if (!ok) return log('VR-Headset nicht gefunden');
+      $('#webgl').addEventListener('click', enterXR);
+      log('Klick ins Bild → VR starten');
+    }
+    async function enterXR() {
+      xrSession = await navigator.xr.requestSession('immersive-vr', {requiredFeatures:['local-floor']});
+      gl = $('#webgl').getContext('webgl', {xrCompatible:true});
+      renderer = new THREE.WebGLRenderer({canvas:$('#webgl'), context:gl});
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 100);
+      xrSession.updateRenderState({baseLayer:new XRWebGLLayer(xrSession, gl)});
+      xrSession.requestReferenceSpace('local-floor').then(refSpace => {
+        xrSession.requestAnimationFrame(onXRFrame);
+      });
+      xrSession.addEventListener('end', () => { xrSession = null; removeMediaLayer(); });
+      if (currentVideo) await rebuildMediaLayer(currentVideo);
+      if (currentType === 'model' && gltfScene) scene.add(gltfScene);
+    }
+    function removeMediaLayer() {
+      if (mediaLayer) { xrSession.updateRenderState({layers:[]}); mediaLayer = null; }
+    }
+    async function rebuildMediaLayer(video) {
+      removeMediaLayer();
+      if (!video) return;
+      const cfg = readScreenCfg();
+      const binding = new XRMediaBinding(xrSession);
+      const opts = {stereo:cfg.stereo};
+      if (cfg.curve) {
+        opts.radius = cfg.radius;
+        opts.centralAngle = cfg.centralAngle;
+        opts.aspectRatio = cfg.width / cfg.height;
+        mediaLayer = binding.createCylinderLayer(video, opts);
+      } else {
+        opts.width = cfg.width;
+        opts.height = cfg.height;
+        mediaLayer = binding.createQuadLayer(video, opts);
+      }
+      mediaLayer.transform = new XRRigidTransform({x:0,y:0,z:-cfg.distance}, {x:0,y:0,z:0,w:1});
+      xrSession.updateRenderState({layers:[mediaLayer]});
+    }
+    function readScreenCfg() {
+      const curve = $('#curveCB').checked;
+      const width = parseFloat($('#sizeSL').value);
+      const distance = parseFloat($('#distSL').value);
+      const stereo = $('#stereoSel').value === 'sbs' ? 'stereo-left-to-right' :
+                     $('#stereoSel').value === 'tb' ? 'stereo-top-bottom' : 'mono';
+      return {
+        curve,
+        width: curve ? width * 1.6 : width,
+        height: width * 0.5625,
+        radius: width,
+        centralAngle: 70 * Math.PI / 180,
+        distance,
+        stereo
+      };
+    }
+
+    /* ========== SLIDER / UI ========== */
+    [$('#sizeSL'), $('#distSL'), $('#curveCB'), $('#stereoSel')].forEach(el =>
+      el.addEventListener('input', () => { if (xrSession && currentVideo) rebuildMediaLayer(currentVideo); })
+    );
+    $('#resetBtn').onclick = () => {
+      $('#sizeSL').value = DEFAULTS.width;
+      $('#distSL').value = DEFAULTS.distance;
+      $('#curveCB').checked = false;
+      if (xrSession && currentVideo) rebuildMediaLayer(currentVideo);
+    };
+    $('#favBtn').onclick = () => {
+      if (!currentName) return log('Kein Medium geladen');
+      const cfg = readScreenCfg();
+      fav.add({
+        name: currentName,
+        url: currentVideo ? currentVideo.src : $('#urlIn').value,
+        type: currentType,
+        stereo: $('#stereoSel').value,
+        screen: {curve:cfg.curve, width:cfg.width, height:cfg.height, radius:cfg.radius, distance:cfg.distance},
+        thumb: currentVideo ? currentVideo.src : $('#urlIn').value
+      });
+    };
+    $('#showFavBtn').onclick = () => fav.showUI();
+
+    /* ========== FILE / URL INPUT ========== */
+    $('#fileIn').onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      const type = file.name.match(/\.(glb|gltf)$/i) ? 'model' :
+                   file.type.startsWith('video') ? 'video' : 'image';
+      loadMedia(url, type, 'mono');
+    };
+    $('#urlBtn').onclick = () => {
+      const url = $('#urlIn').value.trim();
+      if (!url) return;
+      const type = url.match(/\.(glb|gltf)(\?.*)?$/i) ? 'model' :
+                   url.match(/\.(mp4|webm|ogg|mov)(\?.*)?$/i) ? 'video' : 'image';
+      loadMedia(url, type, 'mono');
+    };
+
+    /* ========== RENDER LOOP ========== */
+    function onXRFrame(t, frame) {
+      const session = frame.session;
+      session.requestAnimationFrame(onXRFrame);
+      const refSpace = renderer.xr.getReferenceSpace();
+      const pose = frame.getViewerPose(refSpace);
+      if (pose) {
+        const glLayer = session.renderState.baseLayer;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+        if (currentType === 'model' && !mediaLayer) {
+          // klassisches three.js für Modelle
+          for (const view of pose.views) {
+            const viewport = glLayer.getViewport(view);
+            renderer.setViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+            camera.matrix.fromArray(view.transform.matrix);
+            camera.projectionMatrix.fromArray(view.projectionMatrix);
+            camera.updateMatrixWorld(true);
+            renderer.render(scene, camera);
+          }
+        }
+      }
+    }
+
+    /* ========== START ========== */
+    initXR();
+  </script>
+</body>
+</html>
