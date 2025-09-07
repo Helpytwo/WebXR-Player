@@ -10,7 +10,6 @@ export async function imageToVideo(file) {
   const ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0);
 
-  // 0 fps = still image, aber MediaStream → Video-Element
   const stream = canvas.captureStream(0);
   const video = document.createElement('video');
   video.srcObject = stream;

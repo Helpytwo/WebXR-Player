@@ -20,14 +20,20 @@
     .favRow span{flex:1}
     #fileIn,#urlIn,#modelIn{margin:.2em 0}
     #logger{position:absolute;bottom:0;left:0;right:0;background:#000a;color:#0f0;font-family:monospace;font-size:12px;max-height:6em;overflow:auto;padding:.3em;pointer-events:none}
+    #playlistControls{margin-top:.5em}
   </style>
 </head>
 <body>
   <div id="flatUI">
     <div>
-      <input type="file" id="fileIn" accept="video/*,image/*,.glb,.gltf">
+      <input type="file" id="fileIn" accept="video/*,image/*,.glb,.gltf" webkitdirectory directory multiple>
       <input type="url" id="urlIn" placeholder="http...">
       <button id="urlBtn">URL laden</button>
+    </div>
+    <div id="playlistControls" style="display:none">
+      <button id="prevBtn">⬅ Vorheriges Bild</button>
+      <button id="nextBtn">Nächstes Bild ➡</button>
+      <span id="imgCounter"></span>
     </div>
     <div>
       <label>Größe <input type="range" id="sizeSL" min="1" max="10" step="0.1" value="4"></label>
@@ -69,6 +75,10 @@
 
     const DEFAULTS = { width:4, height:2.25, radius:4, centralAngle:70*Math.PI/180, distance:2.5 };
 
+    /* ========== PLAYLIST ========== */
+    let imageFiles = [];          // alle Bild-Dateien im Ordner
+    let currentImageIndex = -1;   // Index des aktuellen Bildes
+
     /* ========== FAVORITEN ========== */
     const FAV_KEY = 'mm_favs';
     const fav = {
@@ -106,6 +116,35 @@
       if (!f) return;
       loadMedia(f.url, f.type, f.stereo, f.screen);
     };
+
+    /* ========== PLAYLIST STEUERUNG ========== */
+    function updatePlaylistUI() {
+      $('#imgCounter').textContent = `${currentImageIndex + 1} / ${imageFiles.length}`;
+      $('#prevBtn').disabled = currentImageIndex <= 0;
+      $('#nextBtn').disabled = currentImageIndex >= imageFiles.length - 1;
+    }
+    $('#prevBtn').onclick = () => {
+      if (currentImageIndex > 0) {
+        currentImageIndex--;
+        loadCurrentImage();
+      }
+    };
+    $('#nextBtn').onclick = () => {
+      if (currentImageIndex < imageFiles.length - 1) {
+        currentImageIndex++;
+        loadCurrentImage();
+      }
+    };
+    async function loadCurrentImage() {
+      const file = imageFiles[currentImageIndex];
+      if (!file) return;
+      const video = await import('./image-to-video.js').then(m => m.imageToVideo(file));
+      currentVideo = video;
+      currentType = 'image';
+      currentName = file.name;
+      updatePlaylistUI();
+      if (xrSession) await rebuildMediaLayer(video);
+    }
 
     /* ========== MEDIA LOADING ========== */
     async function loadMedia(url, type, stereo, screenCfg) {
@@ -240,21 +279,33 @@
     };
     $('#showFavBtn').onclick = () => fav.showUI();
 
-    /* ========== FILE / URL INPUT – GEÄNDERT FÜR BILDER ========== */
+    /* ========== FILE INPUT – ORDNER-SCAN + PLAYLIST ========== */
     $('#fileIn').onchange = async e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const type = file.name.match(/\.(glb|gltf)$/i) ? 'model' :
-                   file.type.startsWith('video') ? 'video' : 'image';
-      if (type === 'image') {
-        const video = await import('./image-to-video.js').then(m => m.imageToVideo(file));
-        currentVideo = video;
-        currentType = 'image';
-        currentName = file.name;
-        if (xrSession) await rebuildMediaLayer(video);
+      const files = Array.from(e.target.files);
+      const images = files.filter(f => f.type.startsWith('image/'));
+      if (images.length === 0) {
+        // Einzelne Datei (Video/Modell)
+        const file = files[0];
+        if (!file) return;
+        const type = file.name.match(/\.(glb|gltf)$/i) ? 'model' :
+                     file.type.startsWith('video') ? 'video' : 'image';
+        if (type === 'image') {
+          imageFiles = images;
+          currentImageIndex = imageFiles.indexOf(file);
+          $('#playlistControls').style.display = 'flex';
+          updatePlaylistUI();
+          loadCurrentImage();
+        } else {
+          const url = URL.createObjectURL(file);
+          loadMedia(url, type, 'mono');
+        }
       } else {
-        const url = URL.createObjectURL(file);
-        loadMedia(url, type, 'mono');
+        // Mehrere Bilder → Playlist
+        imageFiles = images;
+        currentImageIndex = 0;
+        $('#playlistControls').style.display = 'flex';
+        updatePlaylistUI();
+        loadCurrentImage();
       }
     };
     $('#urlBtn').onclick = () => {
